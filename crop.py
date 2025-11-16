@@ -3,7 +3,8 @@ import os
 # This fixes the libGL.so.1 error on Streamlit Cloud (Linux servers)
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 os.environ['DISPLAY'] = ':0'
-# Disable OpenCV GUI backend
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+# Prevent OpenCV from trying to load GUI libraries
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
 
 import streamlit as st
@@ -33,14 +34,19 @@ def load_model():
         # Additional environment variables for headless operation (fixes libGL.so.1 error on Linux)
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         os.environ['DISPLAY'] = ':0'
+        os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
         
-        # Try to set OpenCV to use headless backend if available
+        # Try to import and configure OpenCV in headless mode BEFORE ultralytics imports it
         try:
             import cv2
-            # Force OpenCV to use a headless backend
-            os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+            # Try to disable GUI backends
+            try:
+                # Set to use headless backend
+                cv2.setNumThreads(0)
+            except:
+                pass
         except ImportError:
-            pass  # OpenCV not installed, that's okay
+            pass  # OpenCV will be imported by ultralytics
         
         # Monkey-patch signal.signal to avoid the "signal only works in main thread" error
         import signal
@@ -55,6 +61,10 @@ def load_model():
         
         signal.signal = patched_signal
         
+        # Suppress OpenCV warnings about libGL
+        import warnings
+        warnings.filterwarnings('ignore', category=UserWarning)
+        
         # Now import YOLO - the signal handler error will be caught
         from ultralytics import YOLO
         
@@ -67,10 +77,16 @@ def load_model():
         model = YOLO(model_path)
         return model
     except OSError as e:
-        if 'libGL.so.1' in str(e) or 'libGL' in str(e):
-            st.error("⚠️ **OpenGL Library Error**: The model requires system libraries not available on this server.")
-            st.info("💡 **Solution**: This is a known issue on Streamlit Cloud. Try deploying with a different configuration or contact support.")
-            st.code(f"Error details: {str(e)}", language='text')
+        error_str = str(e)
+        if 'libGL.so.1' in error_str or 'libGL' in error_str:
+            st.error("⚠️ **OpenGL Library Error**: OpenCV is trying to load GUI libraries not available on Streamlit Cloud.")
+            st.info("""
+            💡 **Solutions to try:**
+            1. Make sure `opencv-python-headless` is installed (not `opencv-python`)
+            2. The requirements.txt should have `opencv-python-headless>=4.8.0`
+            3. If the error persists, try uninstalling `opencv-python` if it's installed
+            """)
+            st.code(f"Error: {error_str}", language='text')
         else:
             st.error(f"⚠️ **System Error loading model**: {e}")
         return None
