@@ -1,9 +1,16 @@
+import os
+# Set environment variables BEFORE importing any libraries that might use OpenGL
+# This fixes the libGL.so.1 error on Streamlit Cloud (Linux servers)
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['DISPLAY'] = ':0'
+# Disable OpenCV GUI backend
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+
 import streamlit as st
 from PIL import Image
 import requests
 import numpy as np
 import wikipedia
-import os
 
 # Set the API key and CSE ID - can be set via environment variables or directly
 # Option 1: Use environment variables (recommended for security)
@@ -23,6 +30,18 @@ if not API_KEY or API_KEY == 'your_google_api_key':
 @st.cache_resource
 def load_model():
     try:
+        # Additional environment variables for headless operation (fixes libGL.so.1 error on Linux)
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        os.environ['DISPLAY'] = ':0'
+        
+        # Try to set OpenCV to use headless backend if available
+        try:
+            import cv2
+            # Force OpenCV to use a headless backend
+            os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+        except ImportError:
+            pass  # OpenCV not installed, that's okay
+        
         # Monkey-patch signal.signal to avoid the "signal only works in main thread" error
         import signal
         original_signal = signal.signal
@@ -47,8 +66,17 @@ def load_model():
             
         model = YOLO(model_path)
         return model
+    except OSError as e:
+        if 'libGL.so.1' in str(e) or 'libGL' in str(e):
+            st.error("⚠️ **OpenGL Library Error**: The model requires system libraries not available on this server.")
+            st.info("💡 **Solution**: This is a known issue on Streamlit Cloud. Try deploying with a different configuration or contact support.")
+            st.code(f"Error details: {str(e)}", language='text')
+        else:
+            st.error(f"⚠️ **System Error loading model**: {e}")
+        return None
     except Exception as e:
-        st.error(f"Error loading model: {e}")
+        st.error(f"⚠️ **Error loading model**: {e}")
+        st.info("💡 Check that the model file exists and all dependencies are installed.")
         return None
 
 model = load_model()
@@ -59,24 +87,50 @@ confidence_threshold = st.sidebar.slider("Confidence Threshold", min_value=0.01,
 
 # Function to search the web using Google Custom Search API
 def search_web(query, num_results=3):
-    search_url = f"https://www.googleapis.com/customsearch/v1?q={query}&key={API_KEY}&cx={SEARCH_ENGINE_ID}&num={num_results}"
-    response = requests.get(search_url)
-    data = response.json()
+    # Check if API keys are configured
+    if not API_KEY or API_KEY == 'your_google_api_key' or not SEARCH_ENGINE_ID or SEARCH_ENGINE_ID == 'your_custom_search_engine_id':
+        return []  # Return empty results silently - warning already shown at top
+    
+    try:
+        search_url = f"https://www.googleapis.com/customsearch/v1?q={query}&key={API_KEY}&cx={SEARCH_ENGINE_ID}&num={num_results}"
+        response = requests.get(search_url)
+        data = response.json()
 
-    results = []
-    if 'items' in data:
-        for item in data['items']:
-            title = item.get('title', 'No title')
-            snippet = item.get('snippet', 'No description available')
-            link = item.get('link', '')
-            # Only keep results from Indian websites
-            if 'site:.in' in query and 'amazon.in' in link:
-                results.append({'title': title, 'snippet': snippet, 'link': link})
-            elif 'site:.in' not in query:
-                results.append({'title': title, 'snippet': snippet, 'link': link})
-        return results
-    else:
-        st.error("No results found or an error occurred.")
+        # Check for API errors
+        if 'error' in data:
+            error_message = data['error'].get('message', 'Unknown error')
+            error_code = data['error'].get('code', '')
+            
+            if error_code == 400:
+                st.warning(f"⚠️ API Error: {error_message}. Please check your API key and Search Engine ID.")
+            elif error_code == 403:
+                st.warning(f"⚠️ API Access Denied: {error_message}. Your API key may be invalid or the Custom Search API may not be enabled.")
+            elif error_code == 429:
+                st.warning(f"⚠️ API Quota Exceeded: {error_message}. You've reached your daily search limit.")
+            else:
+                st.warning(f"⚠️ API Error ({error_code}): {error_message}")
+            return []
+
+        results = []
+        if 'items' in data:
+            for item in data['items']:
+                title = item.get('title', 'No title')
+                snippet = item.get('snippet', 'No description available')
+                link = item.get('link', '')
+                # Only keep results from Indian websites
+                if 'site:.in' in query and 'amazon.in' in link:
+                    results.append({'title': title, 'snippet': snippet, 'link': link})
+                elif 'site:.in' not in query:
+                    results.append({'title': title, 'snippet': snippet, 'link': link})
+            return results
+        else:
+            # No items found, but no error - just no results
+            return []
+    except requests.exceptions.RequestException as e:
+        st.warning(f"⚠️ Network error while searching: {str(e)}")
+        return []
+    except Exception as e:
+        st.warning(f"⚠️ Error during search: {str(e)}")
         return []
 
 # Function to get disease information from Wikipedia
@@ -118,7 +172,10 @@ def display_disease_info(disease_name):
             st.write(f"  **Description**: {result['snippet']}")
             st.write(f"  **Reference**: [Read more]({result['link']})")
     else:
-        st.write("**Prevention and Cure Information:** No information found.")
+        if not API_KEY or API_KEY == 'your_google_api_key':
+            st.info("ℹ️ **Prevention and Cure Information:** Configure Google API keys to enable web search features.")
+        else:
+            st.write("**Prevention and Cure Information:** No information found.")
 
     # Display product recommendations
     if product_results:
@@ -128,7 +185,10 @@ def display_disease_info(disease_name):
             st.write(f"  **Description**: {result['snippet']}")
             st.write(f"  **Reference**: [Product Link]({result['link']})")
     else:
-        st.write("**Product Recommendations:** No products found.")
+        if not API_KEY or API_KEY == 'your_google_api_key':
+            st.info("ℹ️ **Product Recommendations:** Configure Google API keys to enable Amazon product search.")
+        else:
+            st.write("**Product Recommendations:** No products found.")
 
 # Main Streamlit app
 st.title("Plant Disease Detection")
